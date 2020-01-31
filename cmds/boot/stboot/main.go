@@ -11,10 +11,10 @@ import (
 	"encoding/pem"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,10 +30,12 @@ var (
 )
 
 const (
-	rootCACertPath          = "/root/LetsEncrypt_Authority_X3.pem"
-	rootCertFingerprintPath = "root/signing_rootcert.fingerprint"
-	entropyAvail            = "/proc/sys/kernel/random/entropy_avail"
-	interfaceUpTimeout      = 6 * time.Second
+	provisioningServerFile = "provisioning-servers.json"
+	networkFile            = "network.json"
+	httpsRootsFile         = "https-root-certificates.pem"
+	ntpServerFile          = "ntp-servers.json"
+	entropyAvail           = "/proc/sys/kernel/random/entropy_avail"
+	interfaceUpTimeout     = 6 * time.Second
 )
 
 var banner = `
@@ -68,40 +70,82 @@ func main() {
 	}
 	log.Print(banner)
 
-	vars, err := stboot.FindHostVarsInInitramfs()
+	vars, err := stboot.FindHostVars()
 	if err != nil {
-		reboot("Cant find Netvars at all: %v", err)
+		reboot("Cannot find netvars: %v", err)
 	}
-
 	if *doDebug {
 		str, _ := json.MarshalIndent(vars, "", "  ")
 		log.Printf("Host variables: %s", str)
 	}
 
-	if vars.HostIP != "" {
-		err = configureStaticNetwork(vars)
+	var data initramfsData
+
+	//////////
+	// Network
+	//////////
+	nc, err := getNetConf()
+	if err != nil {
+		debug("Cannot read network configuration file: %v", err)
+		err = configureDHCPNetwork()
+		if err != nil {
+			reboot("Cannot set up IO: %v", err)
+		}
+	}
+
+	if nc.HostIP != "" && nc.DefaultGateway != "" {
+		if *doDebug {
+			str, _ := json.MarshalIndent(nc, "", "  ")
+			log.Printf("Network configuration: %s", str)
+		}
+		err = configureStaticNetwork(nc)
 	} else {
+		debug("no configuration specified in %s", networkFile)
 		err = configureDHCPNetwork()
 	}
-
 	if err != nil {
-		reboot("Can not set up IO: %v", err)
+		reboot("Cannot set up IO: %v", err)
 	}
 
-	err = validateSystemTime()
+	////////////////////
+	// Time validatition
+	////////////////////
+	if vars.Timestamp == 0 && *doDebug {
+		log.Printf("WARNING: No timestamp found in hostvars")
+	}
+	buildTime := time.Unix(int64(vars.Timestamp), 0)
+	err = validateSystemTime(buildTime)
 	if err != nil {
 		reboot("%v", err)
 	}
 
-	ballPath := path.Join("root/", stboot.BallName)
-	url, err := url.Parse(vars.BootstrapURL)
+	////////////////////
+	// Download bootball
+	////////////////////
+	ballPath := filepath.Join("root/", stboot.BallName)
+
+	bytes, err := data.get(provisioningServerFile)
 	if err != nil {
-		reboot("Invalid bootstrap URL: %v", err)
+		reboot("Bootstrap URLs: %v", err)
 	}
-	url.Path = path.Join(url.Path, stboot.BallName)
-	err = downloadFromHTTPS(url.String(), ballPath)
-	if err != nil {
-		reboot("Downloading bootball failed: %v", err)
+	var urlStrings []string
+	if err = json.Unmarshal(bytes, &urlStrings); err != nil {
+		reboot("Bootstrap URLs: %v", err)
+	}
+
+	for _, rawurl := range urlStrings {
+		url, uerr := url.Parse(rawurl)
+		if uerr != nil {
+			debug("%v", uerr)
+			continue
+		}
+
+		url.Path = path.Join(url.Path, stboot.BallName)
+		uerr = downloadFromHTTPS(url.String(), ballPath)
+		if uerr == nil {
+			break
+		}
+		log.Printf("Download failed: %v", uerr)
 	}
 
 	ball, err := stboot.BootBallFromArchive(ballPath)
@@ -109,22 +153,25 @@ func main() {
 		reboot("Cannot open bootball: %v", err)
 	}
 
-	fp, err := ioutil.ReadFile(rootCertFingerprintPath)
-	if err != nil {
-		reboot("Cannot read fingerprint: %v", err)
+	////////////////////////////////////////////////
+	// Validate bootball's signing root certificates
+	////////////////////////////////////////////////
+	if len(vars.Fingerprints) == 0 {
+		reboot("No root certificate fingerprints found in hostvars")
 	}
+	fp := calculateFingerprint(ball.RootCertPEM)
+	log.Print("Fingerprint of boot ball's root certificate:")
+	log.Print(fp)
+	if !fingerprintIsValid(fp, vars.Fingerprints) {
+		reboot("Root certificate of boot ball does not match expacted fingerprint")
+	}
+	log.Print("OK!")
 
-	if *doDebug {
-		log.Print("Fingerprint of boot ball's root certificate:")
-		log.Print(string(fp))
-	}
-	if !matchFingerprint(ball.RootCertPEM, string(fp)) {
-		reboot("Root certificate of boot ball does not match expacted fingerprint %v", err)
-	}
-
-	// Just choose the first Bootconfig for now
+	////////////////////////////
+	// Verify boot configuration
+	////////////////////////////
 	log.Printf("Pick the first boot configuration")
-	var index = 0
+	var index = 0 // Just choose the first Bootconfig for now
 	bc, err := ball.GetBootConfigByIndex(index)
 	if err != nil {
 		reboot("Cannot get boot configuration %d: %v", index, err)
@@ -143,10 +190,7 @@ func main() {
 		reboot("Did not found enough valid signatures: %d found, %d valid, %d required", n, valid, vars.MinimalSignaturesMatch)
 	}
 
-	if *doDebug {
-		reboot("Signatures: %d found, %d valid, %d required", n, valid, vars.MinimalSignaturesMatch)
-	}
-
+	debug("Signatures: %d found, %d valid, %d required", n, valid, vars.MinimalSignaturesMatch)
 	log.Printf("Bootconfig '%s' passed verification", bc.Name)
 	log.Print(check)
 
@@ -154,27 +198,37 @@ func main() {
 		debug("Dryrun mode: will not boot")
 		return
 	}
-
+	//////////
+	// Boot OS
+	//////////
 	log.Println("Starting up new kernel.")
 
 	if err := bc.Boot(); err != nil {
-		log.Printf("Failed to boot kernel %s: %v", bc.Kernel, err)
+		reboot("Failed to boot kernel %s: %v", bc.Kernel, err)
 	}
 	// if we reach this point, no boot configuration succeeded
 	reboot("No boot configuration succeeded")
 }
 
-// matchFingerprint returns true if fingerprintHex matches the SHA256
-// hash calculated from pem decoded certPEM.
-func matchFingerprint(certPEM []byte, fingerprintHex string) bool {
-	block, _ := pem.Decode(certPEM)
+// fingerprintIsValid returns true if fpHex is equal to on of
+// those in expectedHex.
+func fingerprintIsValid(fpHex string, expectedHex []string) bool {
+	for _, f := range expectedHex {
+		f = strings.TrimSpace(f)
+		if fpHex == f {
+			return true
+		}
+	}
+	return false
+}
+
+// calculateFingerprint returns the SHA256 checksum of the
+// provided certificate.
+func calculateFingerprint(pemBytes []byte) string {
+	block, _ := pem.Decode(pemBytes)
 	fp := sha256.Sum256(block.Bytes)
 	str := hex.EncodeToString(fp[:])
-	str = strings.TrimSpace(str)
-
-	fingerprintHex = strings.TrimSpace(fingerprintHex)
-
-	return str == fingerprintHex
+	return strings.TrimSpace(str)
 }
 
 //reboot trys to reboot the system in an infinity loop

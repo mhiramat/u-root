@@ -5,72 +5,67 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/beevik/ntp"
 	"github.com/u-root/u-root/pkg/rtc"
 )
 
-const (
-	timestampPath string = "/etc/timestamp"
-	ntpTimePool   string = "0.beevik-ntp.pool.ntp.org"
-)
-
-func readRTCTime() (time.Time, error) {
-	rtc, err := rtc.OpenRTC()
+// pollNTP queries the specified NTP server.
+// On error the query is repeated infinitally.
+func pollNTP() (time.Time, error) {
+	data := initramfsData{}
+	bytes, err := data.get(ntpServerFile)
 	if err != nil {
+		reboot("Bootstrap URLs: %v", err)
+	}
+	var servers []string
+	if err = json.Unmarshal(bytes, &servers); err != nil {
 		return time.Time{}, err
 	}
-	return rtc.Read()
-}
-
-func writeRTCTime(t time.Time) error {
-	rtc, err := rtc.OpenRTC()
-	if err != nil {
-		return err
+	for _, server := range servers {
+		log.Printf("Query NTP server %s", server)
+		t, err := ntp.Time(server)
+		if err == nil {
+			return t, nil
+		}
+		log.Printf("NTP error: %v", err)
 	}
-	return rtc.Set(t)
+	//time.Sleep(3 * time.Second)
+	return time.Time{}, errors.New("No NTP server resposnes")
 }
 
 // validateSystemTime sets RTC and OS time according to
 // realtime clock, timestamp and ntp
-func validateSystemTime() error {
-	data, err := ioutil.ReadFile(timestampPath)
+func validateSystemTime(builtTime time.Time) error {
+	rtc, err := rtc.OpenRTC()
 	if err != nil {
-		return err
+		return fmt.Errorf("opening RTC failed: %v", err)
 	}
-	unixTime, err := strconv.Atoi(strings.Trim(string(data), "\n"))
+	rtcTime, err := rtc.Read()
 	if err != nil {
-		return err
+		return fmt.Errorf("reading RTC failed: %v", err)
 	}
-	stampTime := time.Unix(int64(unixTime), 0)
-	if err != nil {
-		return err
-	}
-	rtcTime, err := readRTCTime()
-	if err != nil {
-		return err
-	}
+
 	log.Printf("Systemtime: %v", rtcTime.UTC())
-	if rtcTime.UTC().Before(stampTime.UTC()) {
+	if rtcTime.UTC().Before(builtTime.UTC()) {
 		log.Printf("Systemtime is invalid: %v", rtcTime.UTC())
-		log.Printf("Receive time via NTP from %s", ntpTimePool)
-		ntpTime, err := ntp.Time(ntpTimePool)
+		log.Printf("Receive time via NTP")
+		ntpTime, err := pollNTP()
 		if err != nil {
 			return err
 		}
-		if ntpTime.UTC().Before(stampTime.UTC()) {
+		if ntpTime.UTC().Before(builtTime.UTC()) {
 			return errors.New("NTP spoof may happened")
 		}
 		log.Printf("Update RTC to %v", ntpTime.UTC())
-		err = writeRTCTime(ntpTime)
+		err = rtc.Set(ntpTime)
 		if err != nil {
-			return err
+			return fmt.Errorf("writing RTC failed: %v", err)
 		}
 		reboot("Set system time. Need reboot.")
 	}
