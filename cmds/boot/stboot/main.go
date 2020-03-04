@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -22,11 +23,13 @@ import (
 	"github.com/u-root/u-root/pkg/recovery"
 )
 
-var debug = func(string, ...interface{}) {}
-
 var (
 	dryRun  = flag.Bool("dryrun", false, "Do everything except booting the loaded kernel")
 	doDebug = flag.Bool("d", false, "Print debug output")
+
+	debug = func(string, ...interface{}) {}
+
+	data dataPartition
 )
 
 const (
@@ -79,7 +82,14 @@ func main() {
 		log.Printf("Host variables: %s", str)
 	}
 
-	var data initramfsData
+	/////////////////
+	// Data partition
+	/////////////////
+
+	data, err = findDataPartition()
+	if err != nil {
+		reboot("%v", err)
+	}
 
 	//////////
 	// Network
@@ -147,10 +157,13 @@ func main() {
 		}
 		log.Printf("Download failed: %v", uerr)
 	}
+	if _, err = os.Stat(ballPath); err != nil {
+		reboot("Cannot open bootball: %v", err)
+	}
 
 	ball, err := stboot.BootBallFromArchive(ballPath)
 	if err != nil {
-		reboot("Cannot open bootball: %v", err)
+		reboot("%v", err)
 	}
 
 	////////////////////////////////////////////////
