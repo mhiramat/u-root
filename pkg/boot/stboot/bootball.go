@@ -44,6 +44,10 @@ type BootBall struct {
 func BootBallFromArchive(archive string) (*BootBall, error) {
 	var ball = new(BootBall)
 
+	if _, err := os.Stat(archive); err != nil {
+		return ball, fmt.Errorf("BootBall: %v", err)
+	}
+
 	dir, err := ioutil.TempDir("", "bootball")
 	if err != nil {
 		return ball, fmt.Errorf("BootBall: cannot create tmp dir: %v", err)
@@ -298,7 +302,7 @@ func getConfig(src string) (*Stconfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := stconfigFromBytes(cfgBytes)
+	cfg, err := StconfigFromBytes(cfgBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +432,7 @@ func makeConfigDir(cfg *Stconfig, origDir string) (string, error) {
 	}
 
 	dstPath = filepath.Join(dir, ConfigName)
-	bytes, err := cfg.bytes()
+	bytes, err := cfg.Bytes()
 	if err != nil {
 		return "", err
 	}
