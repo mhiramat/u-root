@@ -446,7 +446,7 @@ func createFileTree(kernel, initramfs, tboot, rootCert string, acms []string) (d
 	}
 	rel = filepath.Join(bootfilesDir, filepath.Base(kernel))
 	dst = filepath.Join(dir, rel)
-	if err = createAndCopy(kernel, dst); err != nil {
+	if err = CreateAndCopy(kernel, dst); err != nil {
 		return
 	}
 	cfg.Kernel = rel
@@ -455,7 +455,7 @@ func createFileTree(kernel, initramfs, tboot, rootCert string, acms []string) (d
 	if initramfs != "" {
 		rel = filepath.Join(bootfilesDir, filepath.Base(initramfs))
 		dst = filepath.Join(dir, rel)
-		if err = createAndCopy(initramfs, dst); err != nil {
+		if err = CreateAndCopy(initramfs, dst); err != nil {
 			return
 		}
 		cfg.Initramfs = rel
@@ -465,7 +465,7 @@ func createFileTree(kernel, initramfs, tboot, rootCert string, acms []string) (d
 	if tboot != "" {
 		rel = filepath.Join(bootfilesDir, filepath.Base(tboot))
 		dst = filepath.Join(dir, rel)
-		if err = createAndCopy(tboot, dst); err != nil {
+		if err = CreateAndCopy(tboot, dst); err != nil {
 			return
 		}
 		cfg.Tboot = rel
@@ -476,7 +476,7 @@ func createFileTree(kernel, initramfs, tboot, rootCert string, acms []string) (d
 		err = errors.New("root certificate missing")
 	}
 	dst = filepath.Join(dir, rootCertPath)
-	if err = createAndCopy(rootCert, dst); err != nil {
+	if err = CreateAndCopy(rootCert, dst); err != nil {
 		return
 	}
 
@@ -485,7 +485,7 @@ func createFileTree(kernel, initramfs, tboot, rootCert string, acms []string) (d
 		for _, acm := range acms {
 			rel = filepath.Join(acmDir, filepath.Base(acm))
 			dst = filepath.Join(dir, rel)
-			if err = createAndCopy(acm, dst); err != nil {
+			if err = CreateAndCopy(acm, dst); err != nil {
 				return
 			}
 			cfg.ACMs = append(cfg.ACMs, rel)
@@ -495,10 +495,10 @@ func createFileTree(kernel, initramfs, tboot, rootCert string, acms []string) (d
 	return
 }
 
-// createAndCopy copies the content of the file at src to dst. If dst does not
+// CreateAndCopy copies the content of the file at src to dst. If dst does not
 // exist it is created. In case case src does not exist, creation of dst
 // or copying fails and error is returned.
-func createAndCopy(src, dst string) error {
+func CreateAndCopy(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err

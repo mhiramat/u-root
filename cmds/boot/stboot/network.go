@@ -40,7 +40,8 @@ type netConf struct {
 }
 
 func getNetConf() (netConf, error) {
-	bytes, err := data.get(networkFile)
+	p := filepath.Join(dataMountPoint, networkFile)
+	bytes, err := ioutil.ReadFile(p)
 	var net netConf
 	if err != nil {
 		return net, err
@@ -52,7 +53,21 @@ func getNetConf() (netConf, error) {
 	return net, nil
 }
 
-func configureStaticNetwork(nc netConf) error {
+func configureStaticNetwork() error {
+	nc, err := getNetConf()
+	if err != nil {
+		debug("cannot read network configuration file: %v", err)
+	}
+	if *doDebug {
+		str, _ := json.MarshalIndent(nc, "", "  ")
+		info("Network configuration: %s", str)
+	}
+	if nc.HostIP == "" {
+		return errors.New("invald network configuration: missing host IP")
+	}
+	if nc.DefaultGateway == "" {
+		return errors.New("invald network configuration: missing default gateway")
+	}
 	info("Setup network configuration with IP: " + nc.HostIP)
 	addr, err := netlink.ParseAddr(nc.HostIP)
 	if err != nil {
@@ -62,17 +77,6 @@ func configureStaticNetwork(nc netConf) error {
 	if err != nil {
 		return fmt.Errorf("error parsing DefaultGateway string to CIDR format address: %v", err)
 	}
-	if nc.DNSServer != "" {
-		dns := net.ParseIP(nc.DNSServer)
-		if dns == nil {
-			return fmt.Errorf("cannot parse DNSServer string %s", nc.DNSServer)
-		}
-		resolvconf := fmt.Sprintf("nameserver %s\n", dns.String())
-		if err = ioutil.WriteFile("/etc/resolv.conf", []byte(resolvconf), 0644); err != nil {
-			return fmt.Errorf("could not write DNS servers to resolv.conf: %v", err)
-		}
-	}
-
 	links, err := findNetworkInterfaces()
 	if err != nil {
 		return err
@@ -108,7 +112,7 @@ func configureStaticNetwork(nc netConf) error {
 }
 
 func configureDHCPNetwork() error {
-	info("Trying to configure network configuration dynamically...")
+	info("Trying to configure network usinh...")
 
 	links, err := findNetworkInterfaces()
 	if err != nil {
@@ -142,6 +146,25 @@ func configureDHCPNetwork() error {
 		}
 	}
 	return errors.New("DHCP configuration failed")
+}
+
+func setDNSServer() error {
+	nc, err := getNetConf()
+	if err != nil {
+		return fmt.Errorf("cannot read network configuration file: %v", err)
+	}
+	if nc.DNSServer == "" {
+		return errors.New("missing dns server entry in network configuration file")
+	}
+	dns := net.ParseIP(nc.DNSServer)
+	if dns == nil {
+		return fmt.Errorf("cannot parse DNSServer string %s", nc.DNSServer)
+	}
+	resolvconf := fmt.Sprintf("nameserver %s\n", dns.String())
+	if err = ioutil.WriteFile("/etc/resolv.conf", []byte(resolvconf), 0644); err != nil {
+		return fmt.Errorf("could not write DNS servers to resolv.conf: %v", err)
+	}
+	return nil
 }
 
 func findNetworkInterfaces() ([]netlink.Link, error) {
@@ -266,7 +289,8 @@ func download(url string, destination string) error {
 // for HTTPS and verifies it.
 func loadHTTPSCertificates() (*x509.CertPool, error) {
 	roots := x509.NewCertPool()
-	bytes, err := data.get(httpsRootsFile)
+	p := filepath.Join(dataMountPoint, httpsRootsFile)
+	bytes, err := ioutil.ReadFile(p)
 	if err != nil {
 		return roots, err
 	}
